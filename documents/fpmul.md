@@ -1,101 +1,67 @@
-# Interface and behavior of `fpmul.v`
+# Interface and Behavior of `fpmul.v`
 
-The port definition of module `fpmul` is as follows:
+## Module Interface
+The `fpmul` module is a pipelined, single-precision floating-point multiplier. It does not utilize a `reset` signal.
 
-```Verilog
+```verilog
 module fpmul(clk, a, b, c, over_mul_under);
-
     input clk;
-    input [31:0] a, b;
-    output [31:0] c;
-    output over_mul_under;
+    input [31:0] a, b;      // IEEE-754 Single Precision Inputs
+    output [31:0] c;        // Result
+    output over_mul_under;  // Exception Flag: Overflow * Underflow (NaN)
 ```
 
-So, it is a pipelined design without a `reset` signal.
+## 1. Data Definitions (IEEE-754)
+Inputs `a`, `b` and output `c` follow the standard IEEE-754 32-bit format:
 
-**The design has partial `underflow`, `overflow`, and `NaN` support.**
+* **Sign (s):** Bit `[31]`
+* **Exponent (e):** Bits `[30:23]`
+* **Mantissa (m):** Bits `[22:0]`
 
-- It only handles `+/- underflow` and `+/- overflow` on the inputs. It does not handle `NaN` input.
+## 2. Exception Logic
+The module detects exceptions based strictly on the **Exponent (`e`)** field. It **does not** handle `NaN` on inputs.
 
-- It handles all  `+/- underflow`, `+/- overflow`, and `NaN` on the output through a special 1-bit output `over_mul_under`. See more details below:
+### Input States
+| State | Condition | Definition |
+| :--- | :--- | :--- |
+| **Underflow (U)** | `e == 0` | Treated as Zero |
+| **Overflow (O)** | `e == 255` | Treated as Infinity |
+| **Normal (N)** | `0 < e < 255` | Standard Value |
 
-See the handling of `+/- underflow` and `+/- overflow` on the inputs in the **Definitions** section below.
+### Output Handling
+* **Exceptions:** `+/- Underflow` and `+/- Overflow` are encoded in the output `c` using standard IEEE bit patterns.
+* **NaN:** `NaN` is **not** encoded in `c`. It is flagged via the side-band signal `over_mul_under` (specifically for the invalid operation $0 \times \infty$).
+* **Rounding:** The result is **Round towards Zero** (Truncation).
 
-## Definitions:
+## 3. Operational Truth Table
+The output `c` and flag `over_mul_under` are determined by the interaction of input states.
 
-We will use the following definitions for `sa`, `ea`, `ma`:
+| Input `a` | Input `b` | Result | `over_mul_under` (NaN) | Note |
+| :---: | :---: | :--- | :---: | :--- |
+| **O** | **O** | **Overflow** | `0` | $\infty \times \infty = \infty$ |
+| **O** | **N** | **Overflow** | `0` | $\infty \times \text{Normal} = \infty$ |
+| **O** | **U** | **NaN** | **1** | $\infty \times 0 = \text{NaN}$ |
+| **N** | **O** | **Overflow** | `0` | $\text{Normal} \times \infty = \infty$ |
+| **N** | **N** | **Calculated** | `0` | Normal multiplication logic |
+| **N** | **U** | **Underflow** | `0` | $\text{Normal} \times 0 = 0$ |
+| **U** | **O** | **NaN** | **1** | $0 \times \infty = \text{NaN}$ |
+| **U** | **N** | **Underflow** | `0` | $0 \times \text{Normal} = 0$ |
+| **U** | **U** | **Underflow** | `0` | $0 \times 0 = 0$ |
 
-  ```
-  sa = a[31];    // sign bit of a
-  ea = a[30:23]; // exponent part of a
-  ma = a[22:0];  // mantissa part of a
-  ```
+## 4. Output Construction
+The bits of `c` (`sc`, `ec`, `mc`) are driven as follows:
 
-  It is clear from the above that `sa`, `ea`, and `ma` follow the *IEEE-754 32-bit location definition*.
+1.  **Sign (`sc`):** Always `sa ^ sb`.
+2.  **Exponent (`ec`):**
+    * **If Underflow:** Set to `0x00`.
+    * **If Overflow:** Set to `0xFF`.
+    * **If NaN:** `ec` is ignored (rely on `over_mul_under`).
+3.  **Mantissa (`mc`):** Calculated logic or forced to 0 based on exception state.
 
-  Similarly:
+## 5. Design History & Rationale
+This module was originally designed in **2006** for the **Xilinx Spartan-3** platform.
 
-  - `b` is `{sb, eb, mb}`
-  - `c` is `{sc, ec, mc}`
+To meet the strict **40MHz post-P&R timing constraint**, deviations from full IEEE-754 compliance were required:
 
-    `sb`, `eb`, `mb`, `sc`, `ec`, and `mc` are defined similarly to `sa`, `ea`, and `ma`.
-    
-    This is so because `a`, `b`, and `c` all follow the same standard definitions.
-
-## Assertions of underflow and overflow of inputs
-
-We need to check `a` and `b` for *underflow* and *overflow* conditions to correctly define `c`'s result.
-
-- `a_underflow` is *asserted* when `ea == 0`, and *deasserted* otherwise.
-- `a_overflow` is *asserted* when `ea == 8'b1111_1111` and *deasserted* otherwise.
-
-  `b_underflow` and `b_overflow` are defined similarly to `a_underflow` and `a_overflow`, except they are derived from `eb`.
-
-## The operational `truth table`:
-
-With *underflow* and *overflow* conditions clearly defined from the previous section, we have an operational truth table:
-
-We use the symbols:
-
-- `U` to designate *underflow*.
-- `O` to designate *overflow*.
-- `N` to designate *normal* (neither *underflow* or *overflow*)
-
-### Here is the truth table of the multiplier operation:
-
-  - Recall that `over_mul_under` signifies that `c` is *NaN*.
-
-| `a` | `b` | Meaning | `c` | `over_mul_under` |
-| :---: | :---: | :--- | :---: | :---: |
-| `O` | `O` | Both `a` and `b` overflow | *overflow* | `0` |
-| `O` | `N` | `a` overflow | `O` | `0` |
-| `O` | `U` | *overflow* multiplies *underflow* | undefined output | `1` |
-| `N` | `O` | `b` overflow |`O` | `0` |
-| `N` | `N` |  normal operation | check multiplication result for *underflow* or *overflow* | `0` |
-| `N` | `U` | `b` underflow | *underflow* | `0` |
-| `U` | `O` | *overflow* multiplies *underflow* | undefined output | `1` |
-| `U` | `N` | `a` underflow | *underflow* | `0` |
-| `U` | `U` | both `a` and `b` underflow | *underflow* | `0` |
-
-## `c` and `over_mul_under` outputs:
-
-- `sc` is always calculated from `sa` and `sb`, so `+/-underflow` and `+/-overflow` outputs are possible.
-- `ec` is as follows:
-
-  - if `c` *underflows*, `ec` is set to `8'b0`.
-  - if `c` *overflows*, `ec` is set to `8'b1111_1111`.
-  - if `c` is *NaN*, assert `over_mul_under` and `ec` can be ignored.
-
-- `sc` only has a meaningful interpretation if `over_mul_under` is deasserted.
-
-**This completely specifies specifies the behavior of `c` and `over_mul_under` (*NaN*) output.**
-
-## FAQs
-
-the project requirement was 40MHz multiplication throughput on *Xilinx Spartan-3* platform in 2006.
-
-All standard-deviations or limited implmentation was done to meet post-P&R 40MHz throughput with some safety margin built-in, hence the following design choices: 
-
-1. `over_mul_under` signal was used for *NaN* instead of encoding it within `c`.
-
-2. `c` is always round towards `0` because round-to-nearest adds more delay.
+1.  **NaN Encoding:** `NaN` is flagged via a dedicated bit (`over_mul_under`) rather than encoding specific bit patterns in `c`. This reduced logic depth in the critical path.
+2.  **Rounding:** **Round-towards-zero** was selected over round-to-nearest to eliminate the additional adder delay required for rounding logic.
