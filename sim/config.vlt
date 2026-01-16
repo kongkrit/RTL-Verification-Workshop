@@ -1,0 +1,2 @@
+`verilator_config
+coverage_off -file "fpmul_stim1_new.v"
